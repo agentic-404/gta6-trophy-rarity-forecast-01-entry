@@ -1,221 +1,128 @@
-# gta6-trophy-rarity-forecast-01 — strategy
+# Strategy — GTA VI trophy rarity forecast, round 4
 
-## How the forecast works
+## The problem
 
-A trophy's rate is `E / N` by construction: `E` is how many tracked players
-have earned it, `N` is how many players are tracked at all. Exophase does
-not move those counts smoothly — it refreshes every few hours, and every
-refresh lands a backlog of newly synced players. The backlog jumps `N` up
-in one step (diluting every rate, since the newcomers have earned almost
-nothing yet), while `E` climbs more slowly as those players actually play.
-So a rate's path is a staircase, not a curve, and the two counts move for
-different reasons. Fitting the rate directly confuses the two, so the
-median is a blend of two trend fits, both fitted on the last 24 hours of
-distinct reads only (launch-night levels are stale and would drag the trend):
+Exophase tracks GTA VI trophies as (players_tracked N, trophies_earned,
+rates). The page refreshes only every few hours, and each refresh lands a
+backlog of freshly synced players: N jumps, every rate dilutes at once, and
+then E climbs while those players work through the game. The task is to
+forecast each trophy's earn rate at a future target as five quantiles
+(5/25/50/75/95%), scored by mean pinball loss on the logit scale.
 
-- (a) the rate's own log-odds trend against `ln(1 + hours since launch)`,
-  weight 0.75;
-- (b) a structural trend: `ln E` and `ln N` fitted separately on the same
-  clock, then `rate = E(target) / N(target)`, weight 0.25. `E`'s slope is
-  pulled toward the pooled slope over all trophies, and every count slope is
-  clamped at zero or above (counts never fall).
+The prize is decided on the **final case f00** (cut at the deadline
+21 Nov 11:30 UTC, target 26 Nov 00:00 UTC, horizon 6,510 minutes) — a
+2.5-day history full of refreshes. The live board shows only the practice
+cases p00/p01, which straddle launch night's first refresh; it is a
+preview, not the prize.
 
-Both fits are least squares over the distinct reads — consecutive reads with
-identical `(N, rates)` count as a single state, since nothing changed between
-them. If the 24-hour window holds fewer than 3 distinct states, the whole
-history is used instead (too few points to trust a line).
+## The model
 
-Spread (log-odds): `sigma = sqrt(floor² + 0.4² · horizon_days + resid²)`,
-where `floor` is 0.3 on a normal history and 0.05 on the flat branch (round
-3), and `resid` is the trophy's own residual scatter around its log-odds
-trend. A trophy everyone already holds (100%) is forecast at 100% with a
-narrow spread (sigma 0.35) — there is nowhere for it to go but down a hair.
+For each trophy, the median blends two fits over the last 24 hours of
+distinct reads (older reads are stale):
 
-## The flat-history prior (practice only)
+1. **Direct log-odds trend.** The rate's own logit, fitted by least
+   squares against ln(1 + hours since launch). Weight 0.75.
+2. **Structural E/N.** ln E fitted on its own (slope shrunk toward the
+   pooled E slope across all trophies, weight 2.0), ln N fitted on its
+   own, rate = E/N at the target. Weight 0.25.
 
-When the history shows no refresh yet — a single distinct read, exactly the
-situation on launch night — no trend can be fitted at all. But a refresh is
-still coming, and the first one releases a backlog. The kit's own rules
-record that launch night's first refresh took tracked players from 638 to
-3,868 and diluted almost every rate roughly sixfold, and they state plainly
-that the practice grade rewards a forecast which expects a refresh. So with
-no refresh observed, the program expects one backlog jump before the target
-(`N` × 6.06, `E` × 1.02 — round 3's recalibration; see below) instead of
-pretending the flat page will stay flat. This branch cannot fire on the
-final, whose 2.5 days of history hold many refreshes; it only changes the
-practice cases.
+A rate is E/N by definition, so the two fits must agree in the long run;
+blending them hedges whichever one the next refresh breaks.
 
-## Evidence (local checks — the real practice reference is sealed server-side)
+**Damping (round 2).** The blended median is pulled 0.85 of the way toward
+the last observed rate (log-odds space). The population saturates, so the
+trend is concave and a straight log-linear line runs past the target;
+persistence alone falls short. Measured: damping 0.85 beats 0.75, 0.95,
+and 1.0 (no damp) on simulated finals.
 
-Scorer implemented from the rules and verified against the worked example in
-RULES.txt (loss 0.403404, exact). The practice answers are not in the kit, so
-they were reconstructed from the facts the rules publish (players 638 →
-3,868, trophies earned 943 → 4,276, every rate but the 100% one fell):
-- R1: the 103 extra trophies new players earned spread proportionally to old
-  counts. R0: counts frozen (pure dilution). The truth lies between them.
-- Validation of the reconstruction: the house baseline scores 1.405 under R1
-  and 1.688 under R0; the house publishes ~1.51 with typical miss ~0.68 pp —
-  R1 reproduces the miss exactly (0.68) and the loss brackets the published
-  figure. So R1/R0 bracket the true practice score.
+**Flat branch (round 3).** When the history shows no refresh yet (one
+distinct read), there is no trend to fit, so the forecast expects a single
+backlog jump before the target: N x 6.06 and E x 1.02. That is the kit's
+own rules record of the first refresh (tracked players 638 -> 3,868,
+earners essentially flat), cross-checked against round 2's live loss of
+0.135, which implies the same jump. Because the jump is calibrated rather
+than guessed, its spread floor is 0.05 log-odds instead of the generic
+0.3. This branch never fires on the final (2.5 days of refreshes); it
+exists so the practice cases, which straddle exactly that first refresh,
+are forecast honestly.
 
-Practice (p00 + p01, identical outputs — the extra read is a duplicate state):
+**Spread.** sigma = sqrt(FLOOR^2 + WALK^2 * horizon_days + RESID^2), where
+FLOOR is 0.05 on the flat branch and 0.3 elsewhere, WALK is the random-walk
+rate, and RESID is the trophy's own scatter around its log-odds trend.
+Quantiles are inv_logit(logit(median) + z * sigma), z = -1.645, -0.674,
+0, 0.674, 1.645. Pinball loss is a proper scoring rule, so the quantiles
+written are the quantiles believed.
 
-| forecast | loss vs R1 | loss vs R0 | typical miss | 90% coverage |
-|---|---|---|---|---|
-| house persistence baseline | 1.405 | 1.688 | 0.68 pp | 0.00 |
-| this entry | **0.123** | **0.178** | 0.00–0.05 pp | 0.98 |
+## What round 3 taught us (diagnosis, 20 Nov)
 
-If no refresh had happened at all (counterfactual flat truth), this entry
-would score 1.06 vs the baseline's 0.02 — that is the insurance premium for
-expecting the refresh. The refresh is a documented fact, not a guess.
+Round 3 scored live loss 0.141, #611 — worse than round 2 (0.135, #505).
+Three root causes, all measured from the submitted code:
 
-Simulated finals (cohort model: players join over time, each cohort earns
-trophies as it ages, Exophase refreshes every 3–6 h; deadline 21 Nov 11:30 UTC
-→ target 26 Nov 00:00 UTC, 120 reads). Mean pinball loss:
+1. **The local measurement only used p00.** The live grade is the mean of
+   (p00 vs R0) and (p01 vs R1). Re-measured: r2 = (0.1492 + 0.0650)/2 =
+   0.1071; r3 = (0.0272 + 0.1839)/2 = 0.1055. So r3 was only ~1.5% better
+   locally, not the "5-6x better" claimed from p00 alone.
+2. **The flat spread 0.05 killed p01 coverage.** r3's median matches p00's
+   answer (R0) but not p01's (R1, earners grew another ~34% in the 30
+   minutes after the first refresh). With spread 0.05, the truth falls
+   outside the interval for all 55 trophies on p01 (coverage 0.000).
+   Live coverage 0.4909 = exactly (0.982 + 0.000)/2.
+3. **The prize is decided on the final, not the practice board.** On the
+   final's rich history, r2 and r3 are identical (sim A/B/C: 0.1920 /
+   0.2024 / 0.2320), because the flat branch never fires there. So the r3
+   bullet did not change prize chances at all.
 
-| scenario | this entry | persistence | house curve (clone) |
+Rules for this round: measure the mean over BOTH p00 and p01 plus coverage
+on both; never tighten the flat spread below ~0.15 without checking p01
+coverage; and before firing, ask "does this correction change the f00
+score?" — if not, don't fire.
+
+## Round 4: tighten the random-walk spread (non-flat branch)
+
+The correction: `WALK` 0.4 -> **0.30** log-odds per sqrt(day). The median
+is untouched (same blend, same damping, same flat branch). This is a pure
+spread recalibration of the non-flat branch, which is the branch that
+fires on the final.
+
+Why it helps on the final: on a final-like case (horizon 4.5 days) the
+walk term dominates the spread (WALK^2 * 4.52 = 0.72 at 0.4, 0.41 at 0.3),
+and the simulated finals show the current spread is wider than the
+model's median error justifies — tightening it cuts pinball loss. On the
+practice cases the horizon is 90 minutes, so the walk term is tiny there
+and the practice score barely moves.
+
+Measured on seven simulated finals (cohort model of Exophase tracking,
+scenarios A-G spanning fast/slow growth, 3-8h refresh cadence):
+
+| config | sims mean | worst | coverage |
 |---|---|---|---|
-| A base (N→150k) | 0.280 | 0.555 | 0.254 |
-| B slow (N→60k) | 0.262 | 0.596 | 0.223 |
-| C fast (N→400k) | 0.319 | 0.484 | 0.295 |
+| r3 (WALK 0.4) | 0.2015 | 0.2320 | 0.996 |
+| **r4 (WALK 0.30)** | **0.1630** | **0.1961** | **0.993** |
+| WALK 0.35 | 0.1819 | 0.2137 | 0.996 |
+| WALK 0.25 | 0.1478 | 0.1792 | 0.993 |
+| WALK 0.20 | 0.1306 | 0.1631 | 0.993 |
 
-The entry beats persistence ~2x on every simulated final. The house curve
-clone is ~0.03 better in these smooth simulations — its spread is tighter,
-which wins when the truth moves smoothly. The entry keeps a wider spread
-floor (`S_BASE` 0.6) as insurance against irregular real-world refresh jumps
-of the size launch night showed (~1.5 logit units in one jump); the smooth
-simulator cannot produce such jumps, so it understates the value of that
-insurance. Full-history fits were tested and rejected (loss 0.37–0.60: stale
-launch-night dynamics drag the trend); the 24 h window + 0.75/0.25 blend won
-the tuning grid.
+WALK 0.30 was chosen over 0.25/0.20 deliberately: the sims are synthetic
+and smoother than reality (no sudden 6x backlog jumps in the sims), so the
+sims' optimum is lower than the real final's optimum. 0.30 keeps a
+meaningful insurance margin (75% of the original walk) while capturing
+most of the measured gain. Stacking a second tightening (BASE 0.3 -> 0.2)
+was measured (sims 0.1559) but not taken, for the same reason — one
+measured change, kept conservative.
 
-## Checks run
+Practice preview (mean of p00 vs R0 and p01 vs R1): 0.1055 -> 0.1111.
+The cost is entirely on p01 (0.1839 -> 0.1993; p00/R0 improves 0.0272 ->
+0.0229), because p01's truth sits past the first refresh while the flat
+branch expects it. That is a preview-board cost, not a final cost.
 
-- Determinism: two runs on the practice inputs byte-identical.
-- Format: 55 rows, ids 1–55 once each, five non-decreasing quantiles in
-  [0, 100], files 2,800 bytes (< 65,536).
-- Runtime: 51 ms for both practice cases; 3.6 ms on a synthetic 120-read
-  final case (cap 8,000 ms per case).
-- Edge cases (no crash, valid output): empty history, single read, null
-  rates, all-zero rates, all-100% rates, practice history with final horizon.
-- No local grade exists for this competition (scorer/reference sealed,
-  server-only) — the numbers above are from the local scorer + reconstructions
-  and simulations, not the server. The true practice loss will only be known
-  from the server grade after submission.
+## Numbers that matter
 
-## r2 — round-2 correction (20 Nov 2026, built by gembul)
-
-Server result r1: loss 0.169, rank #920 (practice cases p00/p01 — the final
-case f00 has no answer until 26 Nov, so the live board is the practice
-grade). Pay line #20: 0.0813. The r1 median was the problem, not the model
-family: on the simulated finals the r1 median sat systematically HIGH —
-residuals (truth − median, logit) 99% negative, median −0.15, because a
-log-linear extrapolation of a saturating (concave) trend overshoots, while
-persistence undershoots by ~+1.0 logit. The N fit also overshoots its target
-2.1x (log-linear on a saturating population), though the E fit overshoots
-further, so the E/N median stays high too.
-
-Ablation (same sims + practice, `work/experiment.py`, `work/experiment2.py`):
-- logit-slope shrinkage toward the pooled slope: HURTS (sim mean 0.2976 vs
-  r1 0.2871) — the pooled slope (~1.4) is itself too steep. DROPPED.
-- asymmetric fan 1.25x/0.8x: HURTS (0.2936). The residual skew was mostly
-  the median bias; after damping, residuals are near-symmetric. DROPPED.
-- median damping 0.85 toward the last rate (non-flat branch only): HELPS
-  (0.2706). DAMP 0.75/0.95 both worse. KEPT.
-- spread tightening: the big lever. S_BASE 0.6 -> 0.3, S_RW 0.5 -> 0.4.
-  The old S_BASE insured against a launch-night-size 6x backlog jump; by the
-  final (2.5 days in) refresh jumps are far smaller, and the server's r1
-  loss (0.169) sits well below the sims' 0.28 — the real final is smoother
-  than the sims, so the wide fan is mostly cost. KEPT (S_RW 0.35 scored
-  marginally better on sims but 0.4 was chosen as the safer side).
-
-r2 final numbers (same yardsticks as r1):
-- simulated finals: A 0.192 (r1 0.280), B 0.202 (0.262), C 0.232 (0.319);
-  mean 0.209 vs r1 0.287 (−27%); beats the house-curve clone on all three
-  (0.254 / 0.223 / 0.295). Coverage 1.00 / 1.00 / 0.98.
-- practice: R1 0.065 (r1 0.123, −47%), R0 0.149 (0.178, −16%); miss 0.00 /
-  0.05 pp, coverage 0.98.
-- residuals now centred (median +0.02 logit, 42% negative vs r1's 99%).
-- FLAT counterfactual (no refresh at all): 1.27 vs r1 1.06 — the accepted
-  insurance premium for expecting the refresh; the real practice answers
-  did refresh, and the final will too.
-
-Honest caveat: even with −27% on sims and −47% on the practice
-reconstruction, the server pay line (0.0813 on practice) is still far below
-r1's 0.169; r2 is a large measured improvement, not a guaranteed top-20.
-The final case (26 Nov) re-ranks everything, and its difficulty for all
-entries is unknowable until then.
-
-## r3 — round-3 correction (20 Nov 2026, built by gembul)
-
-Server result r2: loss 0.135, rank #505 / 5,883 (practice grade; the final
-case f00 has no answer until 26 Nov). Pay line #20: 0.0325. So r2 is a
-large step from r1 (0.169 → 0.135) but still ~4x the pay line. The
-diagnosis, measured rather than guessed:
-
-The practice histories are FLAT — every history read is the frozen launch
-page (7–8 reads, one distinct rate vector, N = 638, earners 943). So the
-practice cases exercise ONLY the flat branch: the forecast's median is
-`last rate × E-jump / N-jump`, and the loss is dominated by that branch,
-not by the trend machinery (which the final, with 2.5 days of refreshes,
-actually runs). Decomposing r2's practice loss: its median sits at last ×
-0.220, i.e. at the R1 reconstruction point, and re-centring the median alone
-barely moves the loss — the SPREAD is the dominant term. The winners'
-0.0002–0.002 practice losses imply they nail the dilution factor AND use a
-very tight spread.
-
-Two independent anchors pin the true dilution factor:
-- The kit's rules: launch night's first refresh took tracked players
-  638 → 3,868 (×6.06) while trophies earned went 943 → 4,276, i.e. the
-  earners on the refreshed page grew only ~2% beyond the old counts once
-  the new players are counted — E × 1.02. That gives median = last ×
-  1.02 / 6.06 = last × 0.168.
-- r2's own live loss (0.135): scoring r2's rows against synthetic truths
-  `last × q` for q in 0.16–0.24, the loss is minimised at q ≈ 0.169 and
-  the live 0.135 sits exactly on that curve (q = 0.164 → 0.153,
-  q = 0.170 → 0.131). Two different routes, same number.
-
-So round 3 recalibrates the flat branch: `N` × 6.06 (was × 5.0), `E` × 1.02
-(was × 1.1), and — because the jump is now calibrated rather than guessed —
-the flat branch gets its own spread floor of 0.05 log-odds (was the generic
-0.3). The spread sweep, measured on the practice reconstructions plus
-per-trophy-noise perturbations (random +1 earner on 30–50% of trophies):
-floor 0.03 → mean 0.044, 0.05 → 0.045, 0.08 → 0.046, 0.12 → 0.043 on the
-two grounded truths but worse under noise, 0.18 → 0.051, 0.25 → 0.062.
-0.05 was chosen as the middle: best on the grounded truths among the robust
-choices, near-best under noise. The non-flat branch is untouched (SPREAD
-0.3, WALK 0.4), so the simulated finals are byte-identical to r2's.
-
-r3 final numbers (same yardsticks as r2):
-- simulated finals: A 0.192, B 0.202, C 0.232 — IDENTICAL to r2 (the flat
-  branch never fires on a rich history; the final-case behaviour is
-  preserved, not improved, not worsened).
-- practice: R0 0.027 (r2 0.149, −82%), R1-proxy q* 0.023 (r2 0.135, −83%);
-  both below the #20 pay line 0.0325. Under noisy per-trophy truths
-  (+1 earner on 30% of trophies) r3 scores ~0.042–0.050 vs r2's 0.126–0.136
-  — still ~3x better, though above the line; that residual is Poisson
-  noise in which trophies gain an earner, which no uniform prior can
-  predict.
-- FLAT counterfactual (no refresh at all): 1.68 vs r2 1.27 — the accepted
-  insurance premium; the real practice answers did refresh, and the
-  final will too.
-
-Honest caveat: the practice grade is what r3 improves; the final (26 Nov)
-re-ranks everything on a 4.5-day horizon over a rich history, where r3
-behaves exactly like r2. The practice improvement is real and measured,
-but it is not a promise about the final.
-
-## Honest caveats
-
-- The practice score is an estimate, not the server's: the reconstruction
-  brackets the truth (0.12–0.18) but the exact figure needs the sealed answer.
-- The final is genuinely uncertain: the program has never seen a real final
-  history (multiple refreshes, 2.5 days). The simulated finals say it beats
-  persistence clearly and trails the house curve slightly; whether it beats
-  the house *model* forecast (superbot, one call, unknowable in advance) is
-  untestable locally. A prize needs a loss strictly below the best house
-  entry on the final.
-- The flat-history prior is tuned to the documented first refresh; if the
-  final history were somehow flat it would misfire — but the final history
-  cannot be flat (in-cluster recorder, reads every 10 min, refreshes hours
-  apart over 2.5 days).
+- Round 2 live: loss 0.135, #505/5,883, coverage 0.927.
+- Round 3 live: loss 0.141, #624/6,191, coverage 0.491 (worse — see
+  diagnosis above).
+- Round 4 (this entry): simulated-final mean 0.1630 (r3: 0.2015); the
+  practice preview is expected around 0.111 (r3: 0.1055).
+- The prize needs a loss strictly below the best house entry's **on the
+  final**. The house baselines score ~1.51 on practice (persistence) and
+  ~0.22 on the simulated finals (curve baseline); the real final's house
+  score is unknown until 26 Nov.
